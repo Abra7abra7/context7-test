@@ -20,19 +20,29 @@ const supabaseAdmin = createClient(
 );
 
 // Helper function to read ReadableStream to buffer
-async function buffer(readable: ReadableStream<Uint8Array>) {
-  const chunks = [];
-  for await (const chunk of readable) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+async function buffer(readable: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const reader = readable.getReader();
+  const chunks: Uint8Array[] = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (value) {
+      chunks.push(value);
+    }
   }
+  // It's important to release the lock even if reading fails, though error handling might be needed
+  reader.releaseLock();
   return Buffer.concat(chunks);
 }
 
 export async function POST(req: NextRequest) {
   console.log('[Webhook] Received request');
   const buf = await buffer(req.body!); // Read the raw body
-  // Correctly get the headers object
-  const headerPayload = headers();
+  // Correctly get the headers object by awaiting the promise
+  const headerPayload = await headers();
   const sig = headerPayload.get('stripe-signature') as string;
 
   if (!sig || !webhookSecret) {

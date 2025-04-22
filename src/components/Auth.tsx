@@ -188,7 +188,7 @@ export default function AuthForm() {
         <div className="flex justify-end mb-4">
              <Button onClick={handleSignOut} variant="outline">Sign Out</Button>
         </div>
-        <Pricing userId={user.id} />
+        <Pricing />
         <hr className="my-6" />
         <h3 className="text-lg font-semibold mb-4">Subscription Status</h3>
         {/* Render the prepared display content */}  
