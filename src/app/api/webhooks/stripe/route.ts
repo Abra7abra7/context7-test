@@ -13,7 +13,8 @@ const relevantEvents = new Set([
 
 export async function POST(req: NextRequest) {
   const body = await req.text();
-  const sig = headers().get('Stripe-Signature') as string;
+  const headersResult = await headers();
+  const sig = headersResult.get('Stripe-Signature') as string;
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
   if (!sig || !webhookSecret) {
@@ -25,9 +26,13 @@ export async function POST(req: NextRequest) {
 
   try {
     event = stripe.webhooks.constructEvent(body, sig, webhookSecret);
-  } catch (err: any) {
-    console.error(`🚨 Error verifying webhook signature: ${err.message}`);
-    return NextResponse.json({ error: `Webhook Error: ${err.message}` }, { status: 400 });
+  } catch (err: unknown) {
+    let errorMessage = 'Unknown error';
+    if (err instanceof Error) {
+        errorMessage = err.message;
+    }
+    console.error(`🚨 Error verifying webhook signature: ${errorMessage}`);
+    return NextResponse.json({ error: `Webhook Error: ${errorMessage}` }, { status: 400 });
   }
 
   if (relevantEvents.has(event.type)) {
