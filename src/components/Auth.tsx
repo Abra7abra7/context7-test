@@ -5,7 +5,7 @@ import { Auth } from '@supabase/auth-ui-react';
 import { ThemeSupa } from '@supabase/auth-ui-shared';
 import Pricing from './Pricing';
 import { Button } from '@/components/ui/button';
-import { createClient } from '@/lib/supabaseClient'; 
+import { createClient } from '@/lib/supabase/client'; 
 import type { Session, User } from '@supabase/supabase-js';
 import { getURL } from '@/lib/utils'; 
 

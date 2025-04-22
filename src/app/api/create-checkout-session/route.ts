@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { stripe } from '@/lib/stripe';
 import { getURL } from '@/lib/utils';
-import { createSupabaseAdminClient } from '@/lib/supabaseClient';
+import { createSupabaseAdminClient } from '@/lib/supabase/server';
 import { cookies } from 'next/headers';
 import { createServerClient, type CookieOptions } from '@supabase/ssr';
 
