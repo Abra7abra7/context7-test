@@ -8,13 +8,10 @@ import { Button } from '@/components/ui/button';
 import { createClient } from '@/lib/supabase/client'; 
 import type { Session, User } from '@supabase/supabase-js';
 import { getURL } from '@/lib/utils'; 
+import { getUserSubscription, Subscription as StripeSubscription } from '@/lib/subscriptionHelpers';
 
-interface Subscription {
-  id: string;
-  user_id: string;
-  status: 'active' | 'inactive' | 'past_due'; 
-  tier: 'basic' | 'standard' | 'premium'; 
-  // Add other relevant fields like current_period_end, etc.
+interface Subscription extends StripeSubscription {
+  tier?: 'basic' | 'standard' | 'premium';
 }
 
 export default function AuthForm() {
@@ -27,28 +24,38 @@ export default function AuthForm() {
   // Function to fetch subscription status - wrapped in useCallback
   const fetchSubscription = useCallback(async (userId: string) => {
     try {
-      // Assuming you have a 'subscriptions' table linked to user ID
-      const { data, error } = await supabase
-        .from('subscriptions') // Replace with your actual table name if different
-        .select('*') // Select all columns or specific ones needed
-        .eq('user_id', userId)
-        .in('status', ['active', 'trialing']) // Check for active or trialing status
-        .single(); // Assuming one active subscription per user
-
-      if (error && error.code !== 'PGRST116') { // PGRST116: No rows found, which is okay
-        console.error('Error fetching subscription:', error);
-        throw error;
-      }
+      // Use our helper function to get the subscription
+      const subscriptionData = await getUserSubscription(userId);
       
       // Log the fetched data before setting state
-      console.log('[Auth.tsx] Fetched subscription data:', data);
+      console.log('[Auth.tsx] Fetched subscription data:', subscriptionData);
       
-      setSubscription(data as Subscription | null); // Set subscription state with type cast
+      // If we have subscription data, determine the tier based on the price ID
+      if (subscriptionData) {
+        // This is a simplified example - you would map price IDs to tiers in a real app
+        let tier: 'basic' | 'standard' | 'premium' = 'basic';
+        
+        // Example mapping of price IDs to tiers (adjust based on your actual price IDs)
+        if (subscriptionData.stripe_price_id.includes('premium')) {
+          tier = 'premium';
+        } else if (subscriptionData.stripe_price_id.includes('standard')) {
+          tier = 'standard';
+        }
+        
+        // Set the subscription with the tier information
+        setSubscription({
+          ...subscriptionData,
+          tier
+        });
+      } else {
+        setSubscription(null);
+      }
     } catch (error) {
-       console.error('Failed to fetch subscription:', error);
-       setSubscription(null); // Ensure state is null on error
+      console.error('Failed to fetch subscription:', error);
+      setSubscription(null); // Ensure state is null on error
     }
-  }, [supabase]); // Add supabase as dependency for useCallback
+  }, []);
+
 
   useEffect(() => {
     const checkSessionAndSubscription = async () => {
@@ -141,16 +148,38 @@ export default function AuthForm() {
   // Prepare subscription display content before return
   let subscriptionDisplay;
   if (subscription) {
-    // Check properties exist - this might be redundant now but safe
-    if (subscription.status && subscription.tier) {
-        subscriptionDisplay = <p>Your subscription is: {subscription.status} (Tier: {subscription.tier})</p>;
-    } else {
-        // Handle case where subscription object exists but properties are missing (unexpected)
-        console.warn('[Auth.tsx] Subscription object present but missing status/tier:', subscription);
-        subscriptionDisplay = <p>Subscription data is incomplete.</p>;
-    }
+    const expiryDate = subscription.current_period_end ? new Date(subscription.current_period_end) : null;
+    const formattedExpiryDate = expiryDate ? expiryDate.toLocaleDateString() : 'Unknown';
+    
+    subscriptionDisplay = (
+      <div className="bg-slate-800 p-4 rounded-md my-4">
+        <h3 className="text-xl font-semibold mb-2">Your Subscription</h3>
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          <div className="font-medium">Status:</div>
+          <div className="capitalize">
+            <span className={`px-2 py-1 rounded ${subscription.status === 'active' ? 'bg-green-700' : 'bg-yellow-700'}`}>
+              {subscription.status}
+            </span>
+          </div>
+          
+          <div className="font-medium">Tier:</div>
+          <div className="capitalize">{subscription.tier || 'Basic'}</div>
+          
+          <div className="font-medium">Renews on:</div>
+          <div>{formattedExpiryDate}</div>
+          
+          <div className="font-medium">Subscription ID:</div>
+          <div className="truncate text-xs text-slate-400">{subscription.stripe_subscription_id}</div>
+        </div>
+      </div>
+    );
   } else {
-    subscriptionDisplay = <p>You do not have an active subscription.</p>;
+    subscriptionDisplay = (
+      <div className="bg-slate-800 p-4 rounded-md my-4 text-center">
+        <p className="text-lg mb-2">You do not have an active subscription.</p>
+        <p className="text-sm text-slate-400">Subscribe to access premium content.</p>
+      </div>
+    );
   }
 
   console.log('Rendering AuthForm. Loading:', loading, 'Session:', !!session, 'Subscription:', subscription); 

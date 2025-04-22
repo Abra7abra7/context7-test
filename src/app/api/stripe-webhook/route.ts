@@ -77,56 +77,230 @@ export async function POST(req: NextRequest) {
       const priceId = session.metadata.priceId;
       const stripeCustomerId = session.customer as string;
       const subscriptionId = session.subscription as string; // Subscription ID is usually in the session for subscription modes
-      // const status = session.status; // 'complete' is for checkout, need subscription status later
       
       console.log(`[Webhook] User ID: ${userId}, Price ID: ${priceId}, Stripe Customer ID: ${stripeCustomerId}, Subscription ID: ${subscriptionId}`);
 
-      // === Insert or Update subscription data in Supabase ===
+      // First, check if the subscriptions table exists
       try {
-        // Example: Upsert into a 'subscriptions' table
-        // Adjust table and column names according to your schema
+        // Check if subscriptions table exists
+        const { error: tableCheckError } = await supabaseAdmin
+          .from('subscriptions')
+          .select('count', { count: 'exact', head: true });
+
+        if (tableCheckError) {
+          // If table doesn't exist, create it
+          console.log('[Webhook] Creating subscriptions table...');
+          const { error: createTableError } = await supabaseAdmin.rpc('create_subscriptions_table');
+          
+          if (createTableError) {
+            console.error('[Webhook] Error creating subscriptions table:', createTableError);
+            throw createTableError;
+          }
+        }
+
+        // Get subscription details from Stripe to ensure we have the latest status
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        
+        // Insert or Update subscription data in Supabase
         const { data, error } = await supabaseAdmin
-          .from('subscriptions') // MAKE SURE 'subscriptions' TABLE EXISTS
+          .from('subscriptions')
           .upsert({
-            user_id: userId,                 // Ensure this column exists and matches type UUID
-            stripe_customer_id: stripeCustomerId, // Ensure this column exists and matches type TEXT
-            stripe_subscription_id: subscriptionId, // Ensure this column exists and matches type TEXT (and is unique if used for conflict)
-            status: 'active', // Set initial status, Stripe subscription object has its own status for later updates
-            price_id: priceId,               // Ensure this column exists and matches type TEXT
-            // You might need 'id' (PK - uuid) if it doesn't default
-            // Add other relevant fields like start_date, end_date from Stripe subscription object if needed
+            user_id: userId,
+            stripe_customer_id: stripeCustomerId,
+            stripe_subscription_id: subscriptionId,
+            status: subscription.status,
+            stripe_price_id: priceId,
+            // Convert Unix timestamps to ISO strings - using type assertion for Stripe types
+            current_period_start: new Date((subscription as any).current_period_start * 1000).toISOString(),
+            current_period_end: new Date((subscription as any).current_period_end * 1000).toISOString(),
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
           }, {
-            onConflict: 'stripe_subscription_id', // Using subscription ID is often more reliable than user_id if user can have multiple subs (even inactive ones)
+            onConflict: 'stripe_subscription_id'
           })
-          .select(); // Select the upserted data
+          .select();
 
         if (error) {
           console.error('[Webhook] Supabase DB Error:', error);
-          throw error; // Throw to be caught by the outer catch block
+          throw error;
         }
-        console.log('[Webhook] Supabase DB operation successful:', data);
+        console.log('[Webhook] Subscription created/updated successfully:', data);
 
       } catch (dbError) {
         const errorMessage = dbError instanceof Error ? dbError.message : 'Unknown DB error';
         console.error(`[Webhook] Error updating Supabase: ${errorMessage}`);
-        // Return 500, Stripe will retry
         return new NextResponse(`Webhook Error: Failed to update database - ${errorMessage}`, { status: 500 });
       }
       break;
     }
-    // === TODO: Handle other relevant events ===
-    // case 'invoice.payment_succeeded':
-    //   // Handle successful recurring payments, update next billing date etc.
-    //   break;
-    // case 'invoice.payment_failed':
-    //   // Handle failed payments, maybe notify user or change subscription status
-    //   break;
-    // case 'customer.subscription.deleted':
-    //   // Handle subscription cancellations
-    //   break;
-    // case 'customer.subscription.updated':
-    //   // Handle plan changes, status changes etc.
-    //   break;
+    
+    case 'invoice.payment_succeeded': {
+      console.log('[Webhook] Handling invoice.payment_succeeded');
+      const invoice = event.data.object as Stripe.Invoice;
+      
+      // Make sure we have a subscription ID
+      // TypeScript doesn't recognize subscription property on Invoice by default
+      // We need to use type assertion to access it
+      const invoiceSubscription = (invoice as Stripe.Invoice & { subscription?: string | Stripe.Subscription }).subscription;
+      if (!invoiceSubscription) {
+        console.log('[Webhook] No subscription associated with this invoice');
+        return new NextResponse('Success: No subscription to update', { status: 200 });
+      }
+      
+      const subscriptionId = typeof invoiceSubscription === 'string' 
+        ? invoiceSubscription 
+        : invoiceSubscription.id;
+      
+      try {
+        // Get the subscription details from Stripe
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        
+        // Get customer ID from the subscription
+        const customerId = typeof subscription.customer === 'string' 
+          ? subscription.customer 
+          : subscription.customer.id;
+        
+        // Find the user_id from Supabase using the customer ID
+        const { data: userData, error: userError } = await supabaseAdmin
+          .from('subscriptions')
+          .select('user_id')
+          .eq('stripe_customer_id', customerId)
+          .single();
+        
+        if (userError || !userData) {
+          console.error('[Webhook] Error finding user for customer:', userError);
+          throw new Error('Could not find user for customer');
+        }
+        
+        // Update the subscription in Supabase
+        const { data, error } = await supabaseAdmin
+          .from('subscriptions')
+          .update({
+            status: subscription.status,
+            // Using type assertion for Stripe types
+            current_period_start: new Date((subscription as any).current_period_start * 1000).toISOString(),
+            current_period_end: new Date((subscription as any).current_period_end * 1000).toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('stripe_subscription_id', subscriptionId)
+          .select();
+        
+        if (error) {
+          console.error('[Webhook] Error updating subscription after payment:', error);
+          throw error;
+        }
+        
+        console.log('[Webhook] Subscription updated after payment:', data);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`[Webhook] Error processing invoice payment: ${errorMessage}`);
+        return new NextResponse(`Webhook Error: ${errorMessage}`, { status: 500 });
+      }
+      break;
+    }
+    
+    case 'invoice.payment_failed': {
+      console.log('[Webhook] Handling invoice.payment_failed');
+      const invoice = event.data.object as Stripe.Invoice;
+      
+      // Same type assertion as above for invoice.subscription
+      const invoiceSubscription = (invoice as Stripe.Invoice & { subscription?: string | Stripe.Subscription }).subscription;
+      if (!invoiceSubscription) {
+        console.log('[Webhook] No subscription associated with this failed invoice');
+        return new NextResponse('Success: No subscription to update', { status: 200 });
+      }
+      
+      const subscriptionId = typeof invoiceSubscription === 'string' 
+        ? invoiceSubscription 
+        : invoiceSubscription.id;
+      
+      try {
+        // Update subscription status in Supabase to 'past_due' or 'incomplete'
+        const { data, error } = await supabaseAdmin
+          .from('subscriptions')
+          .update({
+            status: 'past_due',
+            updated_at: new Date().toISOString()
+          })
+          .eq('stripe_subscription_id', subscriptionId)
+          .select();
+        
+        if (error) {
+          console.error('[Webhook] Error updating subscription after failed payment:', error);
+          throw error;
+        }
+        
+        console.log('[Webhook] Subscription marked as past_due after failed payment:', data);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`[Webhook] Error processing failed invoice: ${errorMessage}`);
+        return new NextResponse(`Webhook Error: ${errorMessage}`, { status: 500 });
+      }
+      break;
+    }
+    
+    case 'customer.subscription.deleted': {
+      console.log('[Webhook] Handling customer.subscription.deleted');
+      const subscription = event.data.object as Stripe.Subscription;
+      
+      try {
+        // Update subscription status in Supabase to 'canceled'
+        const { data, error } = await supabaseAdmin
+          .from('subscriptions')
+          .update({
+            status: 'canceled',
+            canceled_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('stripe_subscription_id', subscription.id)
+          .select();
+        
+        if (error) {
+          console.error('[Webhook] Error updating subscription after cancellation:', error);
+          throw error;
+        }
+        
+        console.log('[Webhook] Subscription marked as canceled:', data);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`[Webhook] Error processing subscription cancellation: ${errorMessage}`);
+        return new NextResponse(`Webhook Error: ${errorMessage}`, { status: 500 });
+      }
+      break;
+    }
+    
+    case 'customer.subscription.updated': {
+      console.log('[Webhook] Handling customer.subscription.updated');
+      const subscription = event.data.object as Stripe.Subscription;
+      
+      try {
+        // Update subscription details in Supabase
+        const { data, error } = await supabaseAdmin
+          .from('subscriptions')
+          .update({
+            status: subscription.status,
+            // Use proper type assertion for timestamp fields
+            current_period_start: new Date((subscription as any).current_period_start * 1000).toISOString(),
+            current_period_end: new Date((subscription as any).current_period_end * 1000).toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('stripe_subscription_id', subscription.id)
+          .select();
+        
+        if (error) {
+          console.error('[Webhook] Error updating subscription after update:', error);
+          throw error;
+        }
+        
+        console.log('[Webhook] Subscription updated after status change:', data);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`[Webhook] Error processing subscription update: ${errorMessage}`);
+        return new NextResponse(`Webhook Error: ${errorMessage}`, { status: 500 });
+      }
+      break;
+    }
+    
     default:
       console.log(`[Webhook] Unhandled event type ${event.type}`);
   }
